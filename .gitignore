@@ -1,0 +1,19 @@
+# 由 setup-build-env.sh 重新生成,不入版本控制
+/SimulateTouch/
+/theos/include/
+
+# 构建临时目录与备份文件
+/pkg-build/
+*.dylib.orig
+*.dylib.bak
+*.dylib.weak
+
+# 中间版本 .deb (只保留最新的发布版)
+veency_0.9.3379_iphoneos-arm.deb
+veency_0.9.4000~m1m2_iphoneos-arm.deb
+
+# IDE / 系统垃圾
+.DS_Store
+*.swp
+*.bak
+__pycache__/
