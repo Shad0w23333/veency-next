@@ -807,9 +807,10 @@ static void VNCDisconnect(rfbClientPtr client) {
 static rfbNewClientAction VNCClient(rfbClientPtr client) {
     @synchronized (condition_) {
         if (h264Enabled_) {
-            // 强制 VT 下一帧产 IDR,让新客户端能立刻拿到 SPS/PPS + keyframe
-            // 注:libvncserver 主路径的 Raw 全屏自动响应由下面 rfbSendFramebufferUpdate 钩拦
             forceNextKeyframe_ = true;
+            // 注:任何对 client->modifiedRegion 的修改(sraRgnSubtract / Destroy)
+            // 都会让 backboardd SIGSEGV — libvncserver 内部状态依赖。
+            // 不动它。改用 client side 容错处理首帧 Raw。
             if (verboseLogging_) NSLog(@"[Veency-VT] 新客户端连接 → 强制下一帧 IDR");
         }
         if (screen_->authPasswdData != NULL) {
@@ -1397,7 +1398,9 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
         }
         matchedClients++;
 
-        NSMutableData *full = [NSMutableData dataWithCapacity:length + 256];
+        NSMutableData *full = [NSMutableData dataWithCapacity:length + 64];
+        // 仅在关键帧前注入 SPS/PPS。客户端解码 P 帧前需要先有过 SPS/PPS,
+        // 因此连接后第一个关键帧到来前的所有 P 帧客户端会丢弃 — 等 1 秒后即正常解码。
         if (isKeyframe && cachedSPS_ && cachedPPS_) {
             static const uint8_t sc[4] = {0,0,0,1};
             [full appendBytes:sc length:4];
