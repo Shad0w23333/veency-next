@@ -105,7 +105,7 @@ def main():
                 s.send(struct.pack('>BBHHHH', 3, 1, 0, 0, w, h))
             except Exception:
                 return
-            time.sleep(0.05)
+            time.sleep(0.1)  # 100ms 节流,避免 libvncserver 主线程发响应造成混流
 
     threading.Thread(target=request_thread, daemon=True).start()
     print("[veency] 等待第一关键帧(iPod 屏幕变化时触发)...")
@@ -115,8 +115,15 @@ def main():
     try:
         while True:
             hdr = recv_n(s, 4)
-            if hdr[0] != 0:  # not FramebufferUpdate
+            mt = hdr[0]
+            # 非 FramebufferUpdate 消息要按对应长度跳过 body,否则后续流偏移
+            if mt == 2:        # Bell:无 body
                 continue
+            if mt == 3:        # ServerCutText:7 bytes 已含 + 4 bytes 长度 + N bytes 文字
+                #  hdr[1..3] 是 padding,接下来 4 bytes 是长度
+                ln = struct.unpack('>I', recv_n(s, 4))[0]; recv_n(s, ln); continue
+            if mt != 0:        # 未知,放弃以免把后续 H.264 字节读乱
+                print(f"  未知服务端消息 type={mt},终止"); return
             nrects = struct.unpack('>H', hdr[2:4])[0]
             for _ in range(nrects):
                 rh = recv_n(s, 12)
@@ -131,20 +138,16 @@ def main():
                         return
                     h264_count += 1; h264_bytes += ln
                     if h264_count == 1:
-                        print(f"[veency] 收到第一帧 H.264 keyframe ({ln} bytes)")
+                        print(f"[veency] 收到第一帧 H.264 ({ln} bytes)")
                     elif h264_count % 30 == 0:
-                        print(f"  [{h264_count} 帧, {h264_bytes/1e3:.0f} KB 累计]")
+                        print(f"  [{h264_count} 帧, {h264_bytes/1e3:.0f} KB,即时 {h264_bytes/h264_count:.0f} B/帧]")
                 elif enc == 0:
-                    # Raw 是 libvncserver 兜底响应,我们若收到说明服务端没拦住
-                    # 静默吞掉 payload,避免流偏移;后续要在服务端 hook 修
+                    # Raw 兜底响应(libvncserver 在 H.264 模式下也可能首帧自动发)
                     recv_n(s, rw * rh_ * 4); other_skip += 1
                 elif enc == 16:  # ZRLE
-                    ln = struct.unpack('>I', recv_n(s, 4))[0]
-                    recv_n(s, ln); other_skip += 1
+                    ln = struct.unpack('>I', recv_n(s, 4))[0]; recv_n(s, ln); other_skip += 1
                 else:
-                    # 未知编码 — 流可能已乱,但先尝试继续(打印告警)
-                    print(f"  未知 enc 0x{enc_u:08x},尝试跳过...")
-                    return
+                    print(f"  未知 enc 0x{enc_u:08x},终止"); return
     except EOFError:
         print("server closed")
     except KeyboardInterrupt:
@@ -154,7 +157,7 @@ def main():
         except: pass
         ffplay.terminate()
         s.close()
-    print(f"\n=== 共 {h264_count} 帧 H.264, {h264_bytes/1e6:.2f} MB / 跳过 {other_skip} 个 non-H.264 rect ===")
+    print(f"\n=== 共 {h264_count} 帧 H.264 / {h264_bytes/1e6:.2f} MB / 跳过 {other_skip} non-H.264 rect ===")
 
 if __name__ == '__main__':
     main()

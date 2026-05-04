@@ -206,6 +206,7 @@ static int64_t vtFrameNo_ = 0;
 static NSData *cachedSPS_ = nil;
 static NSData *cachedPPS_ = nil;
 static volatile bool forceNextKeyframe_ = false;  // 新客户端连接 → 下一帧强制 IDR
+static NSLock *h264WriteLock_ = nil;             // 串行化 H.264 socket 写入,避免回调多线程穿插
 
 // 自定义 RFB 编码 ID
 #define rfbEncodingVeencyH264 0x48323634  // 'H264'
@@ -1274,6 +1275,8 @@ static void SetupVTEncoder() {
     }
     if (vtQueue_ == NULL)
         vtQueue_ = dispatch_queue_create("com.saurik.veency.vt", DISPATCH_QUEUE_SERIAL);
+    if (h264WriteLock_ == nil)
+        h264WriteLock_ = [[NSLock alloc] init];
 
     NSDictionary *srcAttrs = [NSDictionary dictionaryWithObjectsAndKeys:
         [NSNumber numberWithUnsignedInt:'BGRA'], (id)kCVPixelBufferPixelFormatTypeKey,
@@ -1378,6 +1381,10 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
     static int sendCount_ = 0;
     int matchedClients = 0;
     int totalClients = 0;
+
+    // 全局串行化:避免多个 VT 回调同时写 socket 造成字节穿插
+    [h264WriteLock_ lock];
+
     rfbClientIteratorPtr it = rfbGetClientIterator(screen_);
     rfbClientPtr cl;
     while ((cl = rfbClientIteratorNext(it)) != NULL) {
@@ -1400,8 +1407,10 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
         }
         [full appendBytes:nalu length:length];
 
-        // 关键:与 libvncserver 主线程的 write 串行化,否则字节会穿插
-        LOCK(cl->outputMutex);
+        // 注:libvncserver 编译时未启用 pthread(MUTEX 宏为 no-op,
+        // cl->outputMutex 字段并不真实存在),所以 LOCK 会访问不存在的内存崩溃。
+        // 我们只写 H.264 帧,libvncserver 主线程在 h264 模式下不会发任何更新
+        // (modifiedRegion 为空),所以单写者无竞争。
 
         rfbFramebufferUpdateMsg fum;
         fum.type = rfbFramebufferUpdate;
@@ -1420,12 +1429,13 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
         uint32_t lenBE = Swap32IfLE((uint32_t)full.length);
         rfbWriteExact(cl, (char *)&lenBE, 4);
         rfbWriteExact(cl, (char *)full.bytes, full.length);
-
-        UNLOCK(cl->outputMutex);
     }
     rfbReleaseClientIterator(it);
-    if (++sendCount_ <= 5 || sendCount_ % 30 == 0) {
-        NSLog(@"[Veency-VT] SendH264 #%d: %d/%d clients matched, %luB %s",
+
+    [h264WriteLock_ unlock];
+
+    if (verboseLogging_ && (++sendCount_ <= 5 || sendCount_ % 60 == 0)) {
+        NSLog(@"[Veency-VT] SendH264 #%d: %d/%d clients %luB %s",
               sendCount_, matchedClients, totalClients, (unsigned long)length,
               isKeyframe ? "[KEY]" : "");
     }
@@ -1469,16 +1479,48 @@ static void H264OutputCallback(void *refCon, void *srcRef,
               cbCount_, (int)rc, (unsigned long)avccTotal, avccPtr);
     if (rc != 0 || !avccPtr || avccTotal == 0) return;
 
-    NSMutableData *annexB = AVCCtoAnnexB((const uint8_t *)avccPtr, avccTotal);
-    if (verboseLogging_ && (vtFrameNo_ % 30 == 0)) {
-        NSLog(@"[Veency-VT] frame=%lld %@ %lu→%lu bytes",
-              (long long)vtFrameNo_, isKeyframe ? @"[KEY]" : @"     ",
-              (unsigned long)avccTotal, (unsigned long)annexB.length);
+    // 打印前 16 字节,排查 AVCC 长度前缀是否合理
+    if (cbCount_ <= 3) {
+        const uint8_t *p = (const uint8_t *)avccPtr;
+        NSLog(@"[Veency-VT] CB#%d: avcc[0..15]=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+              cbCount_, p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7],
+              p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
     }
 
-    @synchronized (condition_) {
-        SendH264NALUToClients((const uint8_t *)annexB.bytes, annexB.length,
-                              isKeyframe, (int)destwidth_, (int)destheight_);
+    @autoreleasepool {
+        NSMutableData *annexB = AVCCtoAnnexB((const uint8_t *)avccPtr, avccTotal);
+        if (cbCount_ <= 3) {
+            NSLog(@"[Veency-VT] CB#%d: annexB.length=%lu (from avccTotal=%lu)",
+                  cbCount_, (unsigned long)annexB.length, (unsigned long)avccTotal);
+        }
+
+        // Bypass 验证:写到设备 /tmp/veency_h264.bin,确认编码器端到端 OK
+        // (开关:VerboseLogging 同时开 → 写文件;关 → 跳过)
+        if (verboseLogging_) {
+            static FILE *dumpFp = NULL;
+            static int dumpedFrames = 0;
+            if (!dumpFp) dumpFp = fopen("/tmp/veency_h264.bin", "wb");
+            if (dumpFp && dumpedFrames < 300) {
+                if (isKeyframe && cachedSPS_ && cachedPPS_ && dumpedFrames == 0) {
+                    static const uint8_t sc[4] = {0,0,0,1};
+                    fwrite(sc, 1, 4, dumpFp);
+                    fwrite(cachedSPS_.bytes, 1, cachedSPS_.length, dumpFp);
+                    fwrite(sc, 1, 4, dumpFp);
+                    fwrite(cachedPPS_.bytes, 1, cachedPPS_.length, dumpFp);
+                }
+                fwrite(annexB.bytes, 1, annexB.length, dumpFp);
+                fflush(dumpFp);
+                dumpedFrames++;
+                if (dumpedFrames == 30 || dumpedFrames == 100) {
+                    NSLog(@"[Veency-VT] 已 dump %d 帧到 /tmp/veency_h264.bin", dumpedFrames);
+                }
+            }
+        }
+
+        @synchronized (condition_) {
+            SendH264NALUToClients((const uint8_t *)annexB.bytes, annexB.length,
+                                  isKeyframe, (int)destwidth_, (int)destheight_);
+        }
     }
 }
 
