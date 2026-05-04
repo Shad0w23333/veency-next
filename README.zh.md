@@ -31,8 +31,10 @@
 * 执行 `make -f Makefile.osx package`
 
 ### 中文文档导航
+* [USAGE.zh.md](USAGE.zh.md) — **Mac 端如何连 Veency-next(必读)**
 * [README.zh.md](README.zh.md) — 项目简介与安装(本文件)
 * [ARCHITECTURE.zh.md](ARCHITECTURE.zh.md) — 代码架构与每帧数据流向
 * [OPTIMIZATION_PLAN.zh.md](OPTIMIZATION_PLAN.zh.md) — Tier 1-3 优化路线图(M1+M2 已上机)
 * [OPTIMIZATION_TIER4-7.zh.md](OPTIMIZATION_TIER4-7.zh.md) — Tier 4-7 极致优化(含 iOS 6 时代 Apple 私有 API 研究)
+* [CAPTURE_REWRITE.zh.md](CAPTURE_REWRITE.zh.md) — 视频捕获模块重写设计(VT 硬件 H.264)
 * [BUILD.zh.md](BUILD.zh.md) — 在 macOS 上从源码构建 .deb 的完整指南

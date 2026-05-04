@@ -519,8 +519,11 @@ static void VNCSettings() {
         [h264Profile_ release];
         h264Profile_ = [[settings objectForKey:@"H264Profile"] retain] ?: [@"main" retain];
 
-        NSString *capture = [settings objectForKey:@"CaptureMethod"];
-        useCARenderServer_ = [capture isEqualToString:@"carenderserver"];
+        // 兼容老 key (CaptureMethod=carenderserver) 与新 key (UseCARenderServer=true)
+        NSNumber *useCars = [settings objectForKey:@"UseCARenderServer"];
+        NSString *captureMethod = [settings objectForKey:@"CaptureMethod"];
+        useCARenderServer_ = (useCars != nil && [useCars boolValue])
+            || [captureMethod isEqualToString:@"carenderserver"];
 
         NSNumber *verbose = [settings objectForKey:@"VerboseLogging"];
         verboseLogging_ = verbose == nil ? false : [verbose boolValue];

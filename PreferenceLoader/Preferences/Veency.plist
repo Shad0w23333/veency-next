@@ -6,7 +6,7 @@
     <dict>
         <key>cell</key><string>PSLinkCell</string>
         <key>icon</key><string>VeencyIcon.png</string>
-        <key>label</key><string>Veency</string>
+        <key>label</key><string>Veency-next</string>
     </dict>
 
     <key>items</key>
@@ -97,7 +97,7 @@
         <dict>
             <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>性能 — H.264 硬件编码(实验)</string>
-            <key>footerText</key><string>使用 iPod GPU 硬件 H.264 编码器。带宽 5-15 KB/帧,iPod CPU 几乎为零。需要支持 H.264 的客户端(自带 Mac 客户端 / TigerVNC viewer / 自写)。关闭则走 libvncserver 标准编码(Raw/ZRLE/Hextile)。</string>
+            <key>footerText</key><string>使用 iPod GPU 硬件 H.264 编码器。带宽 5-15 KB/帧,iPod CPU 几乎为零。需要支持 H.264 的客户端(本仓库 mac-client/veency-h264-viewer.py 或 自写 Mac 客户端 / TigerVNC viewer)。关闭则走 libvncserver 标准编码(Raw/ZRLE/Hextile)。</string>
         </dict>
 
         <dict>
@@ -130,23 +130,16 @@
         </dict>
 
         <dict>
-            <key>cell</key><string>PSListItemsCell</string>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>footerText</key><string>Profile 取值:baseline / main / high。Baseline = 兼容性最好,High = 画质最好,Main = 默认平衡。</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
             <key>defaults</key><string>com.saurik.Veency</string>
             <key>key</key><string>H264Profile</string>
             <key>label</key><string>编码 Profile</string>
             <key>default</key><string>main</string>
-            <key>validValues</key>
-            <array>
-                <string>baseline</string>
-                <string>main</string>
-                <string>high</string>
-            </array>
-            <key>validTitles</key>
-            <array>
-                <string>Baseline(兼容性最好)</string>
-                <string>Main(默认,平衡)</string>
-                <string>High(画质最好)</string>
-            </array>
             <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
         </dict>
 
@@ -154,25 +147,15 @@
         <dict>
             <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>捕获方式(高级)</string>
-            <key>footerText</key><string>Hook = IOMobileFramebuffer 钩注(原始 Veency 路径,被动接收每帧)。CARenderServer = 主动 pull(iOS 6 时代 Apple 录屏标准方法,不阻塞 SpringBoard)。VT 编码下推荐用 CARenderServer。</string>
+            <key>footerText</key><string>关闭(默认)= IOMobileFramebuffer 钩注,被动接收每帧,稳定。开启 = CARenderServer 主动 pull,iOS 6 时代 Apple 录屏的官方方法。注:CARenderServer 在 backboardd 内被 SPI 设计限制可能失败,失败会自动回退 hook。</string>
         </dict>
 
         <dict>
-            <key>cell</key><string>PSListItemsCell</string>
+            <key>cell</key><string>PSSwitchCell</string>
             <key>defaults</key><string>com.saurik.Veency</string>
-            <key>key</key><string>CaptureMethod</string>
-            <key>label</key><string>捕获方法</string>
-            <key>default</key><string>hook</string>
-            <key>validValues</key>
-            <array>
-                <string>hook</string>
-                <string>carenderserver</string>
-            </array>
-            <key>validTitles</key>
-            <array>
-                <string>IOMobileFramebuffer Hook(默认)</string>
-                <string>CARenderServer 主动 pull</string>
-            </array>
+            <key>key</key><string>UseCARenderServer</string>
+            <key>label</key><string>使用 CARenderServer 主动 pull</string>
+            <key>default</key><false/>
             <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
         </dict>
 
@@ -196,40 +179,21 @@
         <dict>
             <key>cell</key><string>PSGroupCell</string>
             <key>label</key><string>关于</string>
-        </dict>
+            <key>footerText</key><string>版本: 0.9.5000~h264
 
-        <dict>
-            <key>cell</key><string>PSTitleValueCell</string>
-            <key>label</key><string>版本</string>
-            <key>default</key><string>0.9.5000~h264</string>
-        </dict>
+原作者: Jay Freeman (saurik)
+本分支与中文化: 小丑猫 © 2026
+许可: GNU AGPL v3
 
-        <dict>
-            <key>cell</key><string>PSTitleValueCell</string>
-            <key>label</key><string>原作者</string>
-            <key>default</key><string>Jay Freeman (saurik)</string>
-        </dict>
-
-        <dict>
-            <key>cell</key><string>PSTitleValueCell</string>
-            <key>label</key><string>本分支与中文化</string>
-            <key>default</key><string>小丑猫 © 2026</string>
-        </dict>
-
-        <dict>
-            <key>cell</key><string>PSTitleValueCell</string>
-            <key>label</key><string>许可</string>
-            <key>default</key><string>GNU AGPL v3</string>
-        </dict>
-
-        <dict>
-            <key>cell</key><string>PSGroupCell</string>
-            <key>footerText</key><string>Veency 中文增强版 — M1+M2 已加速 + iOS 6 私有 VT 硬件 H.264 编码实验。原作 © Jay Freeman (saurik)。本分支增强、性能优化、中文化与 Mac 客户端:小丑猫 © 2026。</string>
+Veency-next 中文增强版
+M1+M2 性能优化 · iOS 6 私有 VT 硬件 H.264 实验
+原作 © Jay Freeman (saurik)
+本分支增强、性能优化、中文化、Mac 客户端: 小丑猫 © 2026</string>
         </dict>
 
     </array>
 
     <key>title</key>
-    <string>Veency</string>
+    <string>Veency-next</string>
 </dict>
 </plist>
