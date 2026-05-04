@@ -46,12 +46,17 @@ for f in "$SDK/System/Library/Frameworks/UIKit.framework/Headers/"*.h; do
     fi
 done
 # 大型私有框架空 stub (Tweak.mm 不直接使用,但 SpringBoard 头会传递引入)
-for stub in ChatKit/ChatKit.h ChatKit/ChatKit-Structs.h DataAccess/DataAccess.h \
-            MIME/MIME.h Celestial/Celestial.h MediaPlayer/MediaPlayer.h \
-            AppSupport/AppSupport.h ActorKit/ActorKit.h AccountSettings/AccountSettings.h \
-            MessageUI/MessageUI.h WebKit/WebKit.h; do
-    mkdir -p "theos/include/$(dirname $stub)"
-    [ -f "theos/include/$stub" ] || printf "#pragma once\n" > "theos/include/$stub"
+# 对整个目录下的所有 .h 都覆写成空 stub,避免 class-dump-z 生成的旧代码引用未声明类型
+for fw in ChatKit DataAccess MIME Celestial MediaPlayer AppSupport ActorKit \
+          AccountSettings MessageUI WebKit MobileMail MobileSMS ApplePushService \
+          AppleAccount Marco MailComposer ContentIndex StoreServices Bluetooth; do
+    if [ -d "theos/include/$fw" ]; then
+        for f in theos/include/$fw/*.h; do
+            [ -f "$f" ] && printf "#pragma once\n" > "$f"
+        done
+    fi
+    mkdir -p "theos/include/$fw"
+    [ -f "theos/include/$fw/$fw.h" ] || printf "#pragma once\n" > "theos/include/$fw/$fw.h"
 done
 echo "    ✅ 新建 UIKit stub: $created 个"
 
@@ -98,10 +103,16 @@ cat > theos/include/UIKit/UIKit.h <<'EOF'
 EOF
 cat > theos/include/WebCore/WKTypes.h <<'EOF'
 #pragma once
+// WebCore 内部不透明类型 stub —— 让 UIKit-Structs.h / WKUtilities.h 引用通过
 typedef void *WKObject;
+typedef void *WKObjectRef;
 typedef void *WKViewRef;
 typedef void *WKWindowRef;
 typedef void *WKEventRef;
+typedef void *WKTypeRef;
+typedef void *WKContextRef;
+typedef void *WKMutableArrayRef;
+typedef void *WKArrayRef;
 EOF
 echo "    ✅ UIKit.h + WebCore/WKTypes.h 写入"
 
