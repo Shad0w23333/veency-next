@@ -31,6 +31,7 @@
 #include <CydiaSubstrate.h>
 
 #include <rfb/rfb.h>
+#include <rfb/rfbregion.h>
 #include <rfb/keysym.h>
 
 #include <mach/mach_port.h>
@@ -204,6 +205,7 @@ static dispatch_queue_t vtQueue_ = NULL;
 static int64_t vtFrameNo_ = 0;
 static NSData *cachedSPS_ = nil;
 static NSData *cachedPPS_ = nil;
+static volatile bool forceNextKeyframe_ = false;  // 新客户端连接 → 下一帧强制 IDR
 
 // 自定义 RFB 编码 ID
 #define rfbEncodingVeencyH264 0x48323634  // 'H264'
@@ -803,6 +805,12 @@ static void VNCDisconnect(rfbClientPtr client) {
 
 static rfbNewClientAction VNCClient(rfbClientPtr client) {
     @synchronized (condition_) {
+        if (h264Enabled_) {
+            // 强制 VT 下一帧产 IDR,让新客户端能立刻拿到 SPS/PPS + keyframe
+            // 注:libvncserver 主路径的 Raw 全屏自动响应由下面 rfbSendFramebufferUpdate 钩拦
+            forceNextKeyframe_ = true;
+            if (verboseLogging_) NSLog(@"[Veency-VT] 新客户端连接 → 强制下一帧 IDR");
+        }
         if (screen_->authPasswdData != NULL) {
             [VNCBridge performSelectorOnMainThread:@selector(registerClient) withObject:nil waitUntilDone:YES];
             client->clientGoneHook = &VNCDisconnect;
@@ -1367,11 +1375,20 @@ static void ExtractSPSPPSFromFormat(CMVideoFormatDescriptionRef fmt) {
 static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKeyframe,
                                     int width, int height) {
     if (!screen_ || length == 0) return;
+    static int sendCount_ = 0;
+    int matchedClients = 0;
+    int totalClients = 0;
     rfbClientIteratorPtr it = rfbGetClientIterator(screen_);
     rfbClientPtr cl;
     while ((cl = rfbClientIteratorNext(it)) != NULL) {
+        totalClients++;
         // 只发给已完成握手 + 鉴权 + ClientInit 的客户端(state == RFB_NORMAL == 4)
-        if ((int)cl->state != 4) continue;
+        if ((int)cl->state != 4) {
+            if (verboseLogging_ && sendCount_ < 3)
+                NSLog(@"[Veency-VT] 跳过客户端 fd=%d (state=%d != 4)", cl->sock, (int)cl->state);
+            continue;
+        }
+        matchedClients++;
 
         NSMutableData *full = [NSMutableData dataWithCapacity:length + 256];
         if (isKeyframe && cachedSPS_ && cachedPPS_) {
@@ -1407,12 +1424,21 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
         UNLOCK(cl->outputMutex);
     }
     rfbReleaseClientIterator(it);
+    if (++sendCount_ <= 5 || sendCount_ % 30 == 0) {
+        NSLog(@"[Veency-VT] SendH264 #%d: %d/%d clients matched, %luB %s",
+              sendCount_, matchedClients, totalClients, (unsigned long)length,
+              isKeyframe ? "[KEY]" : "");
+    }
 }
 
 static void H264OutputCallback(void *refCon, void *srcRef,
                                 OSStatus status, uint32_t infoFlags, CMSampleBufferRef sample) {
+    static int cbCount_ = 0;
+    if (++cbCount_ <= 5 || cbCount_ % 30 == 0) {
+        NSLog(@"[Veency-VT] CB#%d status=%d sample=%p flags=0x%x",
+              cbCount_, (int)status, sample, infoFlags);
+    }
     if (status != 0 || !sample) {
-        if (verboseLogging_) NSLog(@"[Veency-VT] callback status=%d", (int)status);
         return;
     }
     if (!fnCMSampleBufferGetDataBuffer || !fnCMBlockBufferGetDataPointer) return;
@@ -1432,9 +1458,15 @@ static void H264OutputCallback(void *refCon, void *srcRef,
     }
 
     CMBlockBufferRef bb = fnCMSampleBufferGetDataBuffer(sample);
-    if (!bb) return;
+    if (!bb) {
+        if (cbCount_ <= 5) NSLog(@"[Veency-VT] CB#%d: GetDataBuffer NULL", cbCount_);
+        return;
+    }
     char *avccPtr = NULL; size_t avccTotal = 0;
     OSStatus rc = fnCMBlockBufferGetDataPointer(bb, 0, NULL, &avccTotal, &avccPtr);
+    if (cbCount_ <= 5)
+        NSLog(@"[Veency-VT] CB#%d: GetDataPointer rc=%d avccTotal=%lu avccPtr=%p",
+              cbCount_, (int)rc, (unsigned long)avccTotal, avccPtr);
     if (rc != 0 || !avccPtr || avccTotal == 0) return;
 
     NSMutableData *annexB = AVCCtoAnnexB((const uint8_t *)avccPtr, avccTotal);
@@ -1459,6 +1491,10 @@ static void EncodeFrameViaVT(void *iosurface, int width, int height) {
         if (verboseLogging_) NSLog(@"[Veency-VT] CVPixelBufferCreateWithIOSurface rc=%d", (int)rc);
         return;
     }
+
+    // 注:ForceKeyFrame 路径会让 backboardd 崩溃(原因不明,可能 SPI 该字段名不同)
+    // 暂时去掉,依赖 KFI=30 自然产生关键帧。客户端最多等 1 秒看到第一帧。
+    forceNextKeyframe_ = false;  // 一次性消费,避免无限累积
 
     CMTimeVL pts = {vtFrameNo_, maxFPS_, 1, 0};
     CMTimeVL dur = {1, maxFPS_, 1, 0};
@@ -1639,6 +1675,17 @@ MSHook(void, rfbRegisterSecurityHandler, rfbSecurityHandler *handler) {
     [pool release];
 }
 
+// 当 H.264 模式启用时,拦截 libvncserver 自身的帧发送,改由我们 VT callback 直推 NALU
+extern "C" rfbBool rfbSendFramebufferUpdate(rfbClientPtr cl, sraRegionPtr modRgn);
+MSHook(rfbBool, rfbSendFramebufferUpdate, rfbClientPtr cl, sraRegionPtr modRgn) {
+    if (h264Enabled_) {
+        // 把待发区域吃掉(变空),让 libvncserver 误以为没东西要发,不会重排或重发
+        sraRgnSubtract(cl->modifiedRegion, cl->modifiedRegion);
+        return TRUE;
+    }
+    return _rfbSendFramebufferUpdate(cl, modRgn);
+}
+
 template <typename Type_>
 static void dlset(Type_ &function, const char *name) {
     function = reinterpret_cast<Type_>(dlsym(RTLD_DEFAULT, name));
@@ -1737,6 +1784,8 @@ MSInitialize {
 
     MSHookFunction((void *)&IOMobileFramebufferSwapSetLayer, MSHake2(IOMobileFramebufferSwapSetLayer));
     MSHookFunction(&rfbRegisterSecurityHandler, MSHake(rfbRegisterSecurityHandler));
+    // 注:rfbSendFramebufferUpdate hook 导致 SIGSEGV(libvncserver 内部状态依赖),已禁用
+    // 改为依赖 outputMutex + cl->state==4 过滤,客户端跳过 Raw rect
 
     if (wait_)
         MSHookFunction(&IOMobileFramebufferSwapWait, MSHake(IOMobileFramebufferSwapWait));
