@@ -1299,21 +1299,48 @@ static void SetupVTEncoder() {
         return;
     }
 
+    // ===== 低延迟相关核心属性 =====
     fnVTCompressionSessionSetProperty(vtSession_, CFSTR("RealTime"), kCFBooleanTrue);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("AllowFrameReordering"), kCFBooleanFalse);
+
+    // 不允许编码器内部缓存帧 → 编完立刻 callback
+    int zero = 0;
+    CFNumberRef zeroNum = CFNumberCreate(NULL, kCFNumberIntType, &zero);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("MaxFrameDelayCount"), zeroNum);
+    CFRelease(zeroNum);
+
+    // 给编码器一个明确的目标帧率 hint(影响码率分配 + 内部 pacing)
+    CFNumberRef fpsNum = CFNumberCreate(NULL, kCFNumberIntType, &maxFPS_);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("ExpectedFrameRate"), fpsNum);
+    CFRelease(fpsNum);
 
     int bps = h264Bitrate_ * 1000;
     CFNumberRef bpsNum = CFNumberCreate(NULL, kCFNumberIntType, &bps);
     fnVTCompressionSessionSetProperty(vtSession_, CFSTR("AverageBitRate"), bpsNum);
     CFRelease(bpsNum);
 
+    // DataRateLimits = [max_bytes_per_window, window_seconds] —— 严格码率上限,避免突发
+    int maxBps = h264Bitrate_ * 1000 * 5 / 4;  // 比 average 多 25%
+    int oneSec = 1;
+    CFNumberRef mb = CFNumberCreate(NULL, kCFNumberIntType, &maxBps);
+    CFNumberRef ws = CFNumberCreate(NULL, kCFNumberIntType, &oneSec);
+    const void *limArr[2] = { mb, ws };
+    CFArrayRef limits = CFArrayCreate(NULL, limArr, 2, &kCFTypeArrayCallBacks);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("DataRateLimits"), limits);
+    CFRelease(mb); CFRelease(ws); CFRelease(limits);
+
+    // 关键帧间隔(默认 30 帧 = 1 秒;低延迟下推荐 10 = 333ms,丢包后快速恢复)
     CFNumberRef kfNum = CFNumberCreate(NULL, kCFNumberIntType, &h264KeyframeInterval_);
     fnVTCompressionSessionSetProperty(vtSession_, CFSTR("MaxKeyFrameInterval"), kfNum);
     CFRelease(kfNum);
+    // 同时也设置时间间隔(秒),优先级以先达到为准
+    double kfSec = (double)h264KeyframeInterval_ / (double)maxFPS_;
+    CFNumberRef kfSecNum = CFNumberCreate(NULL, kCFNumberDoubleType, &kfSec);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("MaxKeyFrameIntervalDuration"), kfSecNum);
+    CFRelease(kfSecNum);
 
-    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("AllowFrameReordering"), kCFBooleanFalse);
-
-    CFStringRef profile = CFSTR("H264_Main_AutoLevel");
-    if ([h264Profile_ isEqualToString:@"baseline"]) profile = CFSTR("H264_Baseline_AutoLevel");
+    CFStringRef profile = CFSTR("H264_Baseline_AutoLevel");  // Baseline 无 B 帧,延迟最低
+    if ([h264Profile_ isEqualToString:@"main"])      profile = CFSTR("H264_Main_AutoLevel");
     else if ([h264Profile_ isEqualToString:@"high"]) profile = CFSTR("H264_High_AutoLevel");
     fnVTCompressionSessionSetProperty(vtSession_, CFSTR("ProfileLevel"), profile);
 
