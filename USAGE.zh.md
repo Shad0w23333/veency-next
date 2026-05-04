@@ -80,7 +80,27 @@ python3 mac-client/veency-h264-viewer.py 127.0.0.1 5900 你的密码
 
 会弹出 ffplay 窗口实时显示 iPod 屏幕(硬件解码,iPod CPU 几乎为零)。
 
-**注意**:H.264 模式下,普通 RealVNC 会看到乱码 —— 因为我们用了自定义 RFB pseudo-encoding `0x48323634`('H264'),只有兼容客户端能解。
+**注意**:
+- H.264 模式下,普通 RealVNC 会看到乱码 —— 因为我们用了自定义 RFB pseudo-encoding `0x48323634`('H264'),只有兼容客户端能解。
+- H.264 路径目前仍有偶发不稳定(backboardd 可能在客户端连接时崩溃,自动重启)。**重试 1-2 次通常能成功**。已测得稳定运行时:**31 FPS @ 640×1136 Baseline,~900 字节/帧**(对比 Raw 2.9 MB/帧 = 3000× 压缩)。
+
+### 验证 H.264 编码本身工作的快速方法
+
+如果 ffplay 显示不出画面但你想验证编码端 OK:
+
+```bash
+# 服务端会在 VerboseLogging 开启时同步 dump 到 /tmp/veency_h264.bin
+# (本地)开 VerboseLogging,触发编码
+ssh -p 2222 root@localhost  # 通过 iproxy 进 iPod
+/usr/libexec/PlistBuddy -c 'Set :VerboseLogging true' /var/mobile/Library/Preferences/com.saurik.Veency.plist
+killall -9 backboardd
+
+# 等几秒,在 iPod 上动一下屏幕
+# 然后拉回 dump 文件
+scp -P 2222 root@localhost:/tmp/veency_h264.bin /tmp/h264.bin
+ffmpeg -f h264 -i /tmp/h264.bin -frames:v 1 /tmp/frame.png
+open /tmp/frame.png  # 应该看到 iPod 当时的屏幕画面
+```
 
 ---
 
