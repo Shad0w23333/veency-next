@@ -6,10 +6,37 @@
      例: python3 veency-h264-viewer.py 127.0.0.1 5900 alpine
 """
 import socket, struct, sys, subprocess, threading
-try:
-    from Crypto.Cipher import DES
-except ImportError:
-    print("缺 PyCryptodome: pip3 install pycryptodome"); sys.exit(2)
+
+def _ensure_pycryptodome():
+    try:
+        from Crypto.Cipher import DES  # noqa
+        return
+    except ImportError:
+        pass
+    print("[setup] 第一次运行 — 自动安装 PyCryptodome (DES 用于 VNC 鉴权)...")
+    for args in (
+        [sys.executable, '-m', 'pip', 'install', '--quiet', 'pycryptodome'],
+        [sys.executable, '-m', 'pip', 'install', '--quiet', '--user', 'pycryptodome'],
+        [sys.executable, '-m', 'pip', 'install', '--quiet', '--break-system-packages', 'pycryptodome'],
+    ):
+        try:
+            subprocess.check_call(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # 确保新装的包能在当前进程立刻 import
+            import importlib, site
+            importlib.reload(site)
+            from Crypto.Cipher import DES  # noqa
+            print("[setup] ✅ 安装成功")
+            return
+        except (subprocess.CalledProcessError, ImportError):
+            continue
+    print("[setup] 自动安装失败。请手动执行其中一条:")
+    print("        pip3 install pycryptodome")
+    print("        pip3 install --user pycryptodome")
+    print("        pip3 install --break-system-packages pycryptodome")
+    sys.exit(2)
+
+_ensure_pycryptodome()
+from Crypto.Cipher import DES
 
 VEENCY_H264 = 0x48323634  # 'H264'
 
@@ -39,21 +66,25 @@ def main():
     if sec != b'\x00\x00\x00\x00':
         print("auth 失败"); return
     s.send(b'\x01')
-    si = recv_n(s, 24); w, h = struct.unpack('>HH', si[:4])
-    nl = struct.unpack('>I', recv_n(s, 4))[0]; recv_n(s, nl)
-    print(f"[veency] 已连 {w}×{h}")
+    # ServerInit (24 bytes固定):w(2) h(2) pixfmt(16) name-length(4) | 然后 name(N bytes)
+    si = recv_n(s, 24)
+    w, h = struct.unpack('>HH', si[:4])
+    nl = struct.unpack('>I', si[20:24])[0]
+    name = recv_n(s, nl).decode('utf-8', errors='replace')
+    print(f"[veency] 已连 {w}×{h} ({name})")
 
-    # 启动 ffplay 用 VideoToolbox 硬解
+    # 启动 ffplay 用 VideoToolbox 硬解 H.264 Annex B 流
     ffplay = subprocess.Popen([
         'ffplay',
+        '-hide_banner',
         '-loglevel', 'error',
-        '-fflags', 'nobuffer',
+        '-probesize', '32',
+        '-analyzeduration', '0',
+        '-fflags', 'nobuffer+flush_packets',
         '-flags', 'low_delay',
         '-framedrop',
-        '-strict', 'experimental',
-        '-vf', 'setpts=0',           # 不插帧延迟
+        '-vf', 'setpts=N/30/TB',     # 强制 30fps 时间戳,降低延迟
         '-f', 'h264',
-        '-c:v', 'h264',              # 也可改 h264_videotoolbox 强制 HW 解
         '-window_title', f'Veency H.264 — {w}×{h}',
         '-i', 'pipe:0',
     ], stdin=subprocess.PIPE)

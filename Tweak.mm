@@ -1370,7 +1370,8 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
     rfbClientIteratorPtr it = rfbGetClientIterator(screen_);
     rfbClientPtr cl;
     while ((cl = rfbClientIteratorNext(it)) != NULL) {
-        // MVP:发给所有客户端(用户开 H.264 时应只用兼容客户端)
+        // 只发给已完成握手 + 鉴权 + ClientInit 的客户端(state == RFB_NORMAL == 4)
+        if ((int)cl->state != 4) continue;
 
         NSMutableData *full = [NSMutableData dataWithCapacity:length + 256];
         if (isKeyframe && cachedSPS_ && cachedPPS_) {
@@ -1381,6 +1382,9 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
             [full appendData:cachedPPS_];
         }
         [full appendBytes:nalu length:length];
+
+        // 关键:与 libvncserver 主线程的 write 串行化,否则字节会穿插
+        LOCK(cl->outputMutex);
 
         rfbFramebufferUpdateMsg fum;
         fum.type = rfbFramebufferUpdate;
@@ -1399,6 +1403,8 @@ static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKey
         uint32_t lenBE = Swap32IfLE((uint32_t)full.length);
         rfbWriteExact(cl, (char *)&lenBE, 4);
         rfbWriteExact(cl, (char *)full.bytes, full.length);
+
+        UNLOCK(cl->outputMutex);
     }
     rfbReleaseClientIterator(it);
 }
