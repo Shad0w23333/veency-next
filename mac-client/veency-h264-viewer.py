@@ -73,6 +73,13 @@ def main():
     name = recv_n(s, nl).decode('utf-8', errors='replace')
     print(f"[veency] 已连 {w}×{h} ({name})")
 
+    # 发 home (button 0x04) 按下 + 抬起,唤醒 iPod 屏幕,触发 OnLayer 进而触发 VT 编码
+    import time
+    s.send(struct.pack('>BBHH', 5, 0x04, w//2, h//2))   # PointerEvent: home
+    time.sleep(0.05)
+    s.send(struct.pack('>BBHH', 5, 0x00, w//2, h//2))   # release
+    print(f"[veency] 已发 home 唤醒事件")
+
     # 启动 ffplay 用 VideoToolbox 硬解 H.264 Annex B 流
     ffplay = subprocess.Popen([
         'ffplay',
@@ -89,19 +96,19 @@ def main():
         '-i', 'pipe:0',
     ], stdin=subprocess.PIPE)
 
-    # 持续发增量请求
+    # 关键:H.264 模式下绝不发 non-incremental(否则 libvncserver 会自动塞 Raw 全屏)
+    # 只发 incremental,server 无标脏 → 不主动响应,我们的 VT 异步把 H.264 NALU 直接 push
     def request_thread():
+        import time
         while True:
             try:
                 s.send(struct.pack('>BBHHHH', 3, 1, 0, 0, w, h))
             except Exception:
                 return
-            import time; time.sleep(0.02)
+            time.sleep(0.05)
 
     threading.Thread(target=request_thread, daemon=True).start()
-
-    # 第一帧整屏
-    s.send(struct.pack('>BBHHHH', 3, 0, 0, 0, w, h))
+    print("[veency] 等待第一关键帧(iPod 屏幕变化时触发)...")
 
     h264_count = 0; h264_bytes = 0
     other_skip = 0
@@ -118,20 +125,25 @@ def main():
                 if enc_u == VEENCY_H264:
                     ln = struct.unpack('>I', recv_n(s, 4))[0]
                     data = recv_n(s, ln)
-                    ffplay.stdin.write(data); ffplay.stdin.flush()
+                    try:
+                        ffplay.stdin.write(data); ffplay.stdin.flush()
+                    except (BrokenPipeError, IOError):
+                        return
                     h264_count += 1; h264_bytes += ln
-                    if h264_count % 30 == 1:
+                    if h264_count == 1:
+                        print(f"[veency] 收到第一帧 H.264 keyframe ({ln} bytes)")
+                    elif h264_count % 30 == 0:
                         print(f"  [{h264_count} 帧, {h264_bytes/1e3:.0f} KB 累计]")
                 elif enc == 0:
+                    # Raw 是 libvncserver 兜底响应,我们若收到说明服务端没拦住
+                    # 静默吞掉 payload,避免流偏移;后续要在服务端 hook 修
                     recv_n(s, rw * rh_ * 4); other_skip += 1
                 elif enc == 16:  # ZRLE
                     ln = struct.unpack('>I', recv_n(s, 4))[0]
                     recv_n(s, ln); other_skip += 1
-                elif enc == 5:  # Hextile - too complex to skip cleanly
-                    print(f"  Hextile encoding encountered, can't skip — stopping")
-                    return
                 else:
-                    print(f"  unknown enc 0x{enc_u:08x} — stopping")
+                    # 未知编码 — 流可能已乱,但先尝试继续(打印告警)
+                    print(f"  未知 enc 0x{enc_u:08x},尝试跳过...")
                     return
     except EOFError:
         print("server closed")
@@ -142,7 +154,7 @@ def main():
         except: pass
         ffplay.terminate()
         s.close()
-    print(f"\n=== 共 {h264_count} 帧, {h264_bytes/1e6:.2f} MB,跳过 {other_skip} 个非 H.264 rect ===")
+    print(f"\n=== 共 {h264_count} 帧 H.264, {h264_bytes/1e6:.2f} MB / 跳过 {other_skip} 个 non-H.264 rect ===")
 
 if __name__ == '__main__':
     main()
