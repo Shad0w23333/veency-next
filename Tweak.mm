@@ -68,6 +68,25 @@ extern "C" void CoreSurfaceBufferFlushProcessorCaches(CoreSurfaceBufferRef buffe
 extern "C" int CoreSurfaceAcceleratorTransferSurface(CoreSurfaceAcceleratorRef accel, CoreSurfaceBufferRef src, CoreSurfaceBufferRef dst, CFDictionaryRef dict);
 extern "C" int BKSHIDEventSendToApplicationWithBundleID(IOHIDEventRef event,NSString* str );
 static void OnLayer(IOMobileFramebufferRef fb, CoreSurfaceBufferRef layer);
+static void ApplyCaptureMethod();
+static void StartCARenderServerCapture();
+static void StopCARenderServerCapture();
+
+// CV / CM 类型(避开 SDK 重声明)
+typedef CFTypeRef CVImageBufferRef;
+typedef CFTypeRef CVPixelBufferRef;
+typedef struct OpaqueCMBlockBuffer *CMBlockBufferRef;
+typedef struct opaqueCMSampleBuffer *CMSampleBufferRef;
+typedef CFTypeRef CMVideoFormatDescriptionRef;
+
+// VT/CM/CV 函数前向声明
+static void SetupVTEncoder();
+static void TeardownVTEncoder();
+static void EncodeFrameViaVT(void *iosurface, int width, int height);
+static void H264OutputCallback(void *outputCallbackRefCon, void *sourceFrameRefCon,
+                                OSStatus status, uint32_t infoFlags, CMSampleBufferRef sampleBuffer);
+static void SendH264NALUToClients(const uint8_t *naluStream, size_t length, bool isKeyframe,
+                                   int width, int height);
 
 static IOMobileFramebufferRef main_=NULL;
 static CoreSurfaceBufferRef layer_=NULL;
@@ -98,6 +117,96 @@ static CFMessagePortRef ashikase_;
 static bool cursor_;
 static int skipBlack_;
 static int divideScreenBy_=1;
+static int maxFPS_=30;
+
+static const int kTileSize = 64;
+static uint32_t *tileChecksums_ = NULL;
+static int tilesX_ = 0;
+static int tilesY_ = 0;
+static int forceFullFrameCounter_ = 0;
+static uint64_t lastFrameSig_ = 0;
+
+// ===== H.264 / CARenderServer 阶段 2-4 设置 =====
+static bool h264Enabled_ = false;
+static int h264Bitrate_ = 4000;            // kbps
+static int h264KeyframeInterval_ = 60;     // frames
+static NSString *h264Profile_ = nil;       // baseline/main/high
+static bool useCARenderServer_ = false;    // CaptureMethod
+static bool verboseLogging_ = false;
+
+// CARenderServer / IOSurface 解析后的函数指针(MSInitialize 时填好)
+typedef int (*CARenderServerRenderDisplay_t)(kern_return_t a, CFStringRef name, void *surface, int x, int y);
+static CARenderServerRenderDisplay_t fnCARenderServerRenderDisplay = NULL;
+typedef CFTypeRef (*IOSurfaceCreate_t)(CFDictionaryRef);
+static IOSurfaceCreate_t fnIOSurfaceCreate = NULL;
+typedef int (*IOSurfaceLock_t)(CFTypeRef, uint32_t, void *);
+static IOSurfaceLock_t fnIOSurfaceLock = NULL;
+typedef int (*IOSurfaceUnlock_t)(CFTypeRef, uint32_t, void *);
+static IOSurfaceUnlock_t fnIOSurfaceUnlock = NULL;
+typedef void *(*IOSurfaceGetBaseAddress_t)(CFTypeRef);
+static IOSurfaceGetBaseAddress_t fnIOSurfaceGetBaseAddress = NULL;
+
+// CARenderServer 捕获状态
+static CFTypeRef carsSurface_ = NULL;
+static dispatch_source_t carsTimer_ = NULL;
+static dispatch_queue_t carsQueue_ = NULL;
+static volatile bool carsRunning_ = false;
+
+// ============== 阶段 3: VT 硬件 H.264 编码 SPI 声明 ==============
+// (CMBlockBufferRef / CMSampleBufferRef / CMVideoFormatDescriptionRef 已在前面声明,OSStatus 由系统头)
+typedef struct OpaqueVTCompressionSession *VTCompressionSessionRef;
+extern "C" CFStringRef kCVPixelBufferPixelFormatTypeKey;
+extern "C" CFStringRef kCVPixelBufferIOSurfacePropertiesKey;
+
+typedef struct {
+    int64_t value;
+    int32_t timescale;
+    uint32_t flags;
+    int64_t epoch;
+} CMTimeVL;  // local copy to avoid SDK header conflict
+
+typedef void (*VTCompressionOutputCallback_t)(
+    void *outputCallbackRefCon, void *sourceFrameRefCon,
+    OSStatus status, uint32_t infoFlags, CMSampleBufferRef sampleBuffer);
+
+typedef OSStatus (*VTCompressionSessionCreate_t)(
+    CFAllocatorRef, int32_t, int32_t, uint32_t,
+    CFDictionaryRef, CFDictionaryRef, CFAllocatorRef,
+    VTCompressionOutputCallback_t, void *, VTCompressionSessionRef *);
+typedef OSStatus (*VTCompressionSessionEncodeFrame_t)(
+    VTCompressionSessionRef, CVImageBufferRef, CMTimeVL, CMTimeVL,
+    CFDictionaryRef, void *, uint32_t *);
+typedef OSStatus (*VTCompressionSessionSetProperty_t)(
+    VTCompressionSessionRef, CFStringRef, CFTypeRef);
+typedef OSStatus (*VTCompressionSessionInvalidate_t)(VTCompressionSessionRef);
+
+typedef CMBlockBufferRef (*CMSampleBufferGetDataBuffer_t)(CMSampleBufferRef);
+typedef CMVideoFormatDescriptionRef (*CMSampleBufferGetFormatDescription_t)(CMSampleBufferRef);
+typedef CFArrayRef (*CMSampleBufferGetSampleAttachmentsArray_t)(CMSampleBufferRef, Boolean);
+typedef OSStatus (*CMBlockBufferGetDataPointer_t)(CMBlockBufferRef, size_t, size_t *, size_t *, char **);
+typedef CFTypeRef (*CMFormatDescriptionGetExtension_t)(CMVideoFormatDescriptionRef, CFStringRef);
+typedef OSStatus (*CVPixelBufferCreateWithIOSurface_t)(CFAllocatorRef, void *, CFDictionaryRef, CVPixelBufferRef *);
+
+static VTCompressionSessionCreate_t fnVTCompressionSessionCreate = NULL;
+static VTCompressionSessionEncodeFrame_t fnVTCompressionSessionEncodeFrame = NULL;
+static VTCompressionSessionSetProperty_t fnVTCompressionSessionSetProperty = NULL;
+static VTCompressionSessionInvalidate_t fnVTCompressionSessionInvalidate = NULL;
+static CMSampleBufferGetDataBuffer_t fnCMSampleBufferGetDataBuffer = NULL;
+static CMSampleBufferGetFormatDescription_t fnCMSampleBufferGetFormatDescription = NULL;
+static CMSampleBufferGetSampleAttachmentsArray_t fnCMSampleBufferGetSampleAttachmentsArray = NULL;
+static CMBlockBufferGetDataPointer_t fnCMBlockBufferGetDataPointer = NULL;
+static CMFormatDescriptionGetExtension_t fnCMFormatDescriptionGetExtension = NULL;
+static CVPixelBufferCreateWithIOSurface_t fnCVPixelBufferCreateWithIOSurface = NULL;
+
+// VT 编码状态
+static VTCompressionSessionRef vtSession_ = NULL;
+static dispatch_queue_t vtQueue_ = NULL;
+static int64_t vtFrameNo_ = 0;
+static NSData *cachedSPS_ = nil;
+static NSData *cachedPPS_ = nil;
+
+// 自定义 RFB 编码 ID
+#define rfbEncodingVeencyH264 0x48323634  // 'H264'
 
 static rfbPixel *black_;
 static rfbPixel *mainFrameBuffer_=NULL;
@@ -393,11 +502,43 @@ static void VNCSettings() {
         NSNumber *skipBlack = [settings objectForKey:@"SkipBlack"];
         skipBlack_ = skipBlack == nil ? 0 : [skipBlack intValue];
 
+        NSNumber *maxFPS = [settings objectForKey:@"MaxFPS"];
+        maxFPS_ = maxFPS == nil ? 30 : [maxFPS intValue];
+        if (maxFPS_ < 5 || maxFPS_ > 60) maxFPS_ = 30;
+        screen_->deferUpdateTime = 1000 / maxFPS_;
+
+        // H.264 / 捕获方式 / 调试
+        NSNumber *h264On = [settings objectForKey:@"H264Enabled"];
+        h264Enabled_ = h264On == nil ? false : [h264On boolValue];
+        NSNumber *h264Br = [settings objectForKey:@"H264Bitrate"];
+        h264Bitrate_ = h264Br == nil ? 4000 : [h264Br intValue];
+        if (h264Bitrate_ < 100 || h264Bitrate_ > 50000) h264Bitrate_ = 4000;
+        NSNumber *h264Kf = [settings objectForKey:@"H264KeyframeInterval"];
+        h264KeyframeInterval_ = h264Kf == nil ? 60 : [h264Kf intValue];
+        if (h264KeyframeInterval_ < 1 || h264KeyframeInterval_ > 600) h264KeyframeInterval_ = 60;
+        [h264Profile_ release];
+        h264Profile_ = [[settings objectForKey:@"H264Profile"] retain] ?: [@"main" retain];
+
+        NSString *capture = [settings objectForKey:@"CaptureMethod"];
+        useCARenderServer_ = [capture isEqualToString:@"carenderserver"];
+
+        NSNumber *verbose = [settings objectForKey:@"VerboseLogging"];
+        verboseLogging_ = verbose == nil ? false : [verbose boolValue];
+
         VNCSettingsScreenSize();
 
         if (clients_ != 0)
             AshikaseSetEnabled(cursor_, true);
     }
+
+    // 设置加载完成后,根据 CaptureMethod 切换捕获方式
+    ApplyCaptureMethod();
+
+    // H.264:开关变化时 Setup / Teardown
+    static bool prevH264_ = false;
+    if (h264Enabled_ && !prevH264_) SetupVTEncoder();
+    else if (!h264Enabled_ && prevH264_) TeardownVTEncoder();
+    prevH264_ = h264Enabled_;
 }
 
 static void VNCNotifySettings(
@@ -710,7 +851,7 @@ static void VNCSetup() {
 
     screen_->alwaysShared = TRUE;
     screen_->handleEventsEagerly = TRUE;
-    screen_->deferUpdateTime = 1000 / 25;
+    screen_->deferUpdateTime = 1000 / maxFPS_;
 
     screen_->serverFormat.redShift = BitsPerSample * 2;
     screen_->serverFormat.greenShift = BitsPerSample * 1;
@@ -772,6 +913,12 @@ static void VNCSetup() {
     screen_->passwordCheck = &VNCCheck;
 
     screen_->cursor = NULL;
+
+    // VNCSetup 完成,所有资源就绪;此时再决定是否切到 CARenderServer 模式
+    ApplyCaptureMethod();
+
+    // H.264 编码器(若开启)
+    if (h264Enabled_) SetupVTEncoder();
 }
 
 static void VNCShutDown() {
@@ -907,8 +1054,416 @@ static int isBottomScreenBlack(const char *data) {
 }
 
 
+static inline uint64_t QuickFrameSignature(const uint32_t *fb, int width, int height) {
+    if (width <= 0 || height <= 0) return 0;
+    uint64_t h = 0;
+    int dx = width / 5; if (dx < 1) dx = 1;
+    int dy = height / 5; if (dy < 1) dy = 1;
+    for (int y = dy; y < height; y += dy)
+        for (int x = dx; x < width; x += dx)
+            h = h * 31 + fb[y * width + x];
+    h = h * 31 + fb[0];
+    h = h * 31 + fb[width - 1];
+    h = h * 31 + fb[(height - 1) * width];
+    h = h * 31 + fb[height * width - 1];
+    return h;
+}
+
+static inline uint32_t TileChecksum(const uint32_t *fb, int tx, int ty, int width, int height) {
+    int x0 = tx * kTileSize, y0 = ty * kTileSize;
+    int x1 = x0 + kTileSize; if (x1 > width) x1 = width;
+    int y1 = y0 + kTileSize; if (y1 > height) y1 = height;
+    uint32_t h = 0x811c9dc5u;
+    for (int y = y0; y < y1; ++y) {
+        const uint32_t *row = fb + y * width + x0;
+        for (int x = x0; x < x1; ++x) {
+            h ^= *row++;
+            h *= 0x01000193u;
+        }
+    }
+    return h;
+}
+
+static void MarkDirtyTiles(const uint32_t *fb, int width, int height) {
+    int newTilesX = (width + kTileSize - 1) / kTileSize;
+    int newTilesY = (height + kTileSize - 1) / kTileSize;
+    bool needFullRefresh = false;
+
+    if (tileChecksums_ == NULL || newTilesX != tilesX_ || newTilesY != tilesY_) {
+        free(tileChecksums_);
+        tilesX_ = newTilesX;
+        tilesY_ = newTilesY;
+        tileChecksums_ = (uint32_t *)calloc(tilesX_ * tilesY_, sizeof(uint32_t));
+        forceFullFrameCounter_ = 0;
+        needFullRefresh = true;
+    } else if (++forceFullFrameCounter_ >= 30) {
+        forceFullFrameCounter_ = 0;
+        needFullRefresh = true;
+    }
+
+    if (needFullRefresh) {
+        rfbMarkRectAsModified(screen_, 0, 0, width, height);
+        for (int ty = 0; ty < tilesY_; ++ty)
+            for (int tx = 0; tx < tilesX_; ++tx)
+                tileChecksums_[ty * tilesX_ + tx] = TileChecksum(fb, tx, ty, width, height);
+        return;
+    }
+
+    for (int ty = 0; ty < tilesY_; ++ty) {
+        for (int tx = 0; tx < tilesX_; ++tx) {
+            uint32_t c = TileChecksum(fb, tx, ty, width, height);
+            int idx = ty * tilesX_ + tx;
+            if (c != tileChecksums_[idx]) {
+                tileChecksums_[idx] = c;
+                int x0 = tx * kTileSize, y0 = ty * kTileSize;
+                int x1 = x0 + kTileSize; if (x1 > width) x1 = width;
+                int y1 = y0 + kTileSize; if (y1 > height) y1 = height;
+                rfbMarkRectAsModified(screen_, x0, y0, x1, y1);
+            }
+        }
+    }
+}
+
+// ============== 阶段 2:CARenderServer 主动捕获路径 ==============
+// 与 IOMobileFramebufferSwapSetLayer 钩注互斥;由 CaptureMethod 设置切换。
+// 这条路 RecordMyScreen / iOS 6 时代 Apple 录屏标准 SPI(CARenderServerRenderDisplay)。
+
+static void StopCARenderServerCapture() {
+    if (carsTimer_) {
+        dispatch_source_cancel(carsTimer_);
+        carsTimer_ = NULL;
+    }
+    if (carsSurface_) {
+        CFRelease(carsSurface_);
+        carsSurface_ = NULL;
+    }
+    carsRunning_ = false;
+    if (verboseLogging_) NSLog(@"[Veency] CARenderServer 捕获已停止");
+}
+
+static void StartCARenderServerCapture() {
+    if (carsRunning_) return;
+    if (!fnCARenderServerRenderDisplay || !fnIOSurfaceCreate || !fnIOSurfaceLock) {
+        NSLog(@"[Veency] CARenderServer SPI 不可用,放弃主动 pull 模式");
+        return;
+    }
+    if (width_ == 0 || height_ == 0 || screen_ == NULL || mainFrameBuffer_ == NULL) {
+        NSLog(@"[Veency] CARenderServer 启动延迟:width=%zu height=%zu screen=%p mainFB=%p",
+              width_, height_, screen_, mainFrameBuffer_);
+        return;
+    }
+
+    int w = (int)destwidth_;
+    int h = (int)destheight_;
+    int bpr = w * 4;
+    NSDictionary *props = [NSDictionary dictionaryWithObjectsAndKeys:
+        [NSNumber numberWithBool:YES], (id)kIOSurfaceIsGlobal,
+        [NSNumber numberWithInt:4], (id)kIOSurfaceBytesPerElement,
+        [NSNumber numberWithInt:bpr], (id)kIOSurfaceBytesPerRow,
+        [NSNumber numberWithInt:w], (id)kIOSurfaceWidth,
+        [NSNumber numberWithInt:h], (id)kIOSurfaceHeight,
+        [NSNumber numberWithUnsignedInt:'BGRA'], (id)kIOSurfacePixelFormat,
+        [NSNumber numberWithInt:bpr * h], (id)kIOSurfaceAllocSize,
+        nil];
+    carsSurface_ = fnIOSurfaceCreate((CFDictionaryRef)props);
+    if (!carsSurface_) {
+        NSLog(@"[Veency] IOSurfaceCreate 失败");
+        return;
+    }
+
+    if (carsQueue_ == NULL)
+        carsQueue_ = dispatch_queue_create("com.saurik.veency.cars", DISPATCH_QUEUE_SERIAL);
+    carsTimer_ = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, carsQueue_);
+    uint64_t interval = NSEC_PER_SEC / maxFPS_;
+    dispatch_source_set_timer(carsTimer_, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              interval, NSEC_PER_MSEC);
+    static int diagFrameCount_ = 0;
+    static int carsFailCount_ = 0;
+    dispatch_source_set_event_handler(carsTimer_, ^{
+        if (clients_ == 0) return;
+        @synchronized (condition_) {
+            if (screen_ == NULL || mainFrameBuffer_ == NULL) return;
+
+            // 1) 拉一帧到 user IOSurface
+            fnIOSurfaceLock(carsSurface_, 0, NULL);
+            int rc = fnCARenderServerRenderDisplay(0, CFSTR("LCD"), (void *)carsSurface_, 0, 0);
+            fnIOSurfaceUnlock(carsSurface_, 0, NULL);
+
+            void *src = fnIOSurfaceGetBaseAddress(carsSurface_);
+            if (rc != 0) {
+                if (++carsFailCount_ <= 3 || carsFailCount_ % 60 == 0) {
+                    NSLog(@"[Veency] CARenderServer rc=%d (#%d 次失败) — 该 SPI 在 backboardd 内不可用,自动停止 CARS 模式回退到 hook",
+                          rc, carsFailCount_);
+                }
+                if (carsFailCount_ >= 3) {
+                    // 自动停止 CARS,回退 hook
+                    dispatch_async(dispatch_get_main_queue(), ^{ StopCARenderServerCapture(); });
+                }
+                return;
+            }
+            // 每 30 帧打一次像素值用于诊断
+            if (++diagFrameCount_ % 30 == 1) {
+                uint32_t *px = (uint32_t *)src;
+                NSLog(@"[Veency-CARS] frame=%d rc=%d px[0,1,100,10000]=%08x %08x %08x %08x",
+                      diagFrameCount_, rc, px ? px[0] : 0, px ? px[1] : 0,
+                      px ? px[100] : 0, px ? px[10000] : 0);
+            }
+
+            // 2) 拷到 mainFrameBuffer_(libvncserver 路径)
+            if (!src) return;
+            memcpy(mainFrameBuffer_, src, w * h * 4);
+            screen_->frameBuffer = (char *)mainFrameBuffer_;
+
+            // 3) 复用 M2 dirty-tile 路径
+            const uint32_t *fb = (const uint32_t *)mainFrameBuffer_;
+            uint64_t sig = QuickFrameSignature(fb, destwidth_, destheight_);
+            if (sig != lastFrameSig_) {
+                lastFrameSig_ = sig;
+                MarkDirtyTiles(fb, destwidth_, destheight_);
+            }
+        }
+    });
+    dispatch_resume(carsTimer_);
+    carsRunning_ = true;
+    NSLog(@"[Veency] CARenderServer 捕获已启动: %d×%d @ %d FPS", w, h, maxFPS_);
+}
+
+// 由 VNCSettings 调用:根据 useCARenderServer_ 切换捕获方式
+static void ApplyCaptureMethod() {
+    if (useCARenderServer_) {
+        StartCARenderServerCapture();
+    } else {
+        StopCARenderServerCapture();
+    }
+}
+
+// ============== 阶段 3: VT 硬件 H.264 编码实现 ==============
+
+static void TeardownVTEncoder() {
+    if (vtSession_ && fnVTCompressionSessionInvalidate) {
+        fnVTCompressionSessionInvalidate(vtSession_);
+        CFRelease(vtSession_);
+        vtSession_ = NULL;
+    }
+    [cachedSPS_ release]; cachedSPS_ = nil;
+    [cachedPPS_ release]; cachedPPS_ = nil;
+    vtFrameNo_ = 0;
+    NSLog(@"[Veency-VT] 编码器已停");
+}
+
+static void SetupVTEncoder() {
+    TeardownVTEncoder();
+    if (!fnVTCompressionSessionCreate || !fnVTCompressionSessionSetProperty) {
+        NSLog(@"[Veency-VT] VT SPI 不可用");
+        return;
+    }
+    if (width_ == 0 || height_ == 0) {
+        NSLog(@"[Veency-VT] 屏幕尺寸 0,延迟创建");
+        return;
+    }
+    if (vtQueue_ == NULL)
+        vtQueue_ = dispatch_queue_create("com.saurik.veency.vt", DISPATCH_QUEUE_SERIAL);
+
+    NSDictionary *srcAttrs = [NSDictionary dictionaryWithObjectsAndKeys:
+        [NSNumber numberWithUnsignedInt:'BGRA'], (id)kCVPixelBufferPixelFormatTypeKey,
+        [NSDictionary dictionary], (id)kCVPixelBufferIOSurfacePropertiesKey,
+        nil];
+
+    OSStatus s = fnVTCompressionSessionCreate(
+        kCFAllocatorDefault,
+        (int32_t)destwidth_, (int32_t)destheight_,
+        'avc1',  // kCMVideoCodecType_H264
+        NULL, (CFDictionaryRef)srcAttrs,
+        kCFAllocatorDefault,
+        H264OutputCallback, NULL,
+        &vtSession_);
+
+    if (s != 0 || !vtSession_) {
+        NSLog(@"[Veency-VT] VTCompressionSessionCreate 失败: %d", (int)s);
+        vtSession_ = NULL;
+        return;
+    }
+
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("RealTime"), kCFBooleanTrue);
+
+    int bps = h264Bitrate_ * 1000;
+    CFNumberRef bpsNum = CFNumberCreate(NULL, kCFNumberIntType, &bps);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("AverageBitRate"), bpsNum);
+    CFRelease(bpsNum);
+
+    CFNumberRef kfNum = CFNumberCreate(NULL, kCFNumberIntType, &h264KeyframeInterval_);
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("MaxKeyFrameInterval"), kfNum);
+    CFRelease(kfNum);
+
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("AllowFrameReordering"), kCFBooleanFalse);
+
+    CFStringRef profile = CFSTR("H264_Main_AutoLevel");
+    if ([h264Profile_ isEqualToString:@"baseline"]) profile = CFSTR("H264_Baseline_AutoLevel");
+    else if ([h264Profile_ isEqualToString:@"high"]) profile = CFSTR("H264_High_AutoLevel");
+    fnVTCompressionSessionSetProperty(vtSession_, CFSTR("ProfileLevel"), profile);
+
+    NSLog(@"[Veency-VT] 编码器创建 %d×%d @ %d kbps, KFI=%d, profile=%@",
+          (int)destwidth_, (int)destheight_, h264Bitrate_, h264KeyframeInterval_, h264Profile_);
+}
+
+// AVCC (4-byte BE length prefix) → Annex B (00 00 00 01 start code)
+static NSMutableData *AVCCtoAnnexB(const uint8_t *avcc, size_t len) {
+    NSMutableData *out = [NSMutableData dataWithCapacity:len + 64];
+    static const uint8_t sc[4] = {0,0,0,1};
+    size_t pos = 0;
+    while (pos + 4 <= len) {
+        uint32_t naluLen = ((uint32_t)avcc[pos]<<24) | ((uint32_t)avcc[pos+1]<<16)
+                         | ((uint32_t)avcc[pos+2]<<8) | (uint32_t)avcc[pos+3];
+        pos += 4;
+        if (pos + naluLen > len) break;
+        [out appendBytes:sc length:4];
+        [out appendBytes:avcc + pos length:naluLen];
+        pos += naluLen;
+    }
+    return out;
+}
+
+// 从 formatDescription 抽 SPS/PPS(避开缺失的 GetH264ParameterSetAtIndex)
+static void ExtractSPSPPSFromFormat(CMVideoFormatDescriptionRef fmt) {
+    if (!fnCMFormatDescriptionGetExtension) return;
+    CFTypeRef ext = fnCMFormatDescriptionGetExtension(fmt, CFSTR("SampleDescriptionExtensionAtoms"));
+    if (!ext || CFGetTypeID(ext) != CFDictionaryGetTypeID()) return;
+    CFDataRef avcC = (CFDataRef)CFDictionaryGetValue((CFDictionaryRef)ext, CFSTR("avcC"));
+    if (!avcC || CFGetTypeID(avcC) != CFDataGetTypeID()) return;
+    const uint8_t *p = CFDataGetBytePtr(avcC);
+    CFIndex n = CFDataGetLength(avcC);
+    if (n < 7) return;
+    int numSPS = p[5] & 0x1F;
+    int offset = 6;
+    [cachedSPS_ release]; cachedSPS_ = nil;
+    if (numSPS >= 1 && offset + 2 <= n) {
+        int spsLen = (p[offset] << 8) | p[offset+1]; offset += 2;
+        if (offset + spsLen <= n) {
+            cachedSPS_ = [[NSData alloc] initWithBytes:p+offset length:spsLen];
+            offset += spsLen;
+        }
+    }
+    if (offset >= n) return;
+    int numPPS = p[offset++];
+    [cachedPPS_ release]; cachedPPS_ = nil;
+    if (numPPS >= 1 && offset + 2 <= n) {
+        int ppsLen = (p[offset] << 8) | p[offset+1]; offset += 2;
+        if (offset + ppsLen <= n) {
+            cachedPPS_ = [[NSData alloc] initWithBytes:p+offset length:ppsLen];
+        }
+    }
+    NSLog(@"[Veency-VT] SPS=%lu bytes PPS=%lu bytes",
+          (unsigned long)cachedSPS_.length, (unsigned long)cachedPPS_.length);
+}
+
+// 自定义伪编码协议:发送 H.264 Annex B NALU 流到所有客户端
+// 帧格式:
+//   FramebufferUpdate header (4): type=0, pad=0, nrects=1
+//   Rect header (12): x, y, w, h, encoding=0x48323634
+//   Payload: 4 字节 BE 总长度 + Annex B 流(关键帧前会附 SPS/PPS)
+static void SendH264NALUToClients(const uint8_t *nalu, size_t length, bool isKeyframe,
+                                    int width, int height) {
+    if (!screen_ || length == 0) return;
+    rfbClientIteratorPtr it = rfbGetClientIterator(screen_);
+    rfbClientPtr cl;
+    while ((cl = rfbClientIteratorNext(it)) != NULL) {
+        // MVP:发给所有客户端(用户开 H.264 时应只用兼容客户端)
+
+        NSMutableData *full = [NSMutableData dataWithCapacity:length + 256];
+        if (isKeyframe && cachedSPS_ && cachedPPS_) {
+            static const uint8_t sc[4] = {0,0,0,1};
+            [full appendBytes:sc length:4];
+            [full appendData:cachedSPS_];
+            [full appendBytes:sc length:4];
+            [full appendData:cachedPPS_];
+        }
+        [full appendBytes:nalu length:length];
+
+        rfbFramebufferUpdateMsg fum;
+        fum.type = rfbFramebufferUpdate;
+        fum.pad = 0;
+        fum.nRects = Swap16IfLE(1);
+        rfbWriteExact(cl, (char *)&fum, sz_rfbFramebufferUpdateMsg);
+
+        rfbFramebufferUpdateRectHeader rh;
+        rh.r.x = Swap16IfLE(0);
+        rh.r.y = Swap16IfLE(0);
+        rh.r.w = Swap16IfLE(width);
+        rh.r.h = Swap16IfLE(height);
+        rh.encoding = Swap32IfLE(rfbEncodingVeencyH264);
+        rfbWriteExact(cl, (char *)&rh, sz_rfbFramebufferUpdateRectHeader);
+
+        uint32_t lenBE = Swap32IfLE((uint32_t)full.length);
+        rfbWriteExact(cl, (char *)&lenBE, 4);
+        rfbWriteExact(cl, (char *)full.bytes, full.length);
+    }
+    rfbReleaseClientIterator(it);
+}
+
+static void H264OutputCallback(void *refCon, void *srcRef,
+                                OSStatus status, uint32_t infoFlags, CMSampleBufferRef sample) {
+    if (status != 0 || !sample) {
+        if (verboseLogging_) NSLog(@"[Veency-VT] callback status=%d", (int)status);
+        return;
+    }
+    if (!fnCMSampleBufferGetDataBuffer || !fnCMBlockBufferGetDataPointer) return;
+
+    bool isKeyframe = false;
+    if (fnCMSampleBufferGetSampleAttachmentsArray) {
+        CFArrayRef attachs = fnCMSampleBufferGetSampleAttachmentsArray(sample, false);
+        if (attachs && CFArrayGetCount(attachs) > 0) {
+            CFDictionaryRef att = (CFDictionaryRef)CFArrayGetValueAtIndex(attachs, 0);
+            CFBooleanRef notSync = (CFBooleanRef)CFDictionaryGetValue(att, CFSTR("NotSync"));
+            isKeyframe = (notSync == NULL || !CFBooleanGetValue(notSync));
+        }
+    }
+    if (isKeyframe && cachedSPS_ == nil) {
+        CMVideoFormatDescriptionRef fmt = fnCMSampleBufferGetFormatDescription(sample);
+        if (fmt) ExtractSPSPPSFromFormat(fmt);
+    }
+
+    CMBlockBufferRef bb = fnCMSampleBufferGetDataBuffer(sample);
+    if (!bb) return;
+    char *avccPtr = NULL; size_t avccTotal = 0;
+    OSStatus rc = fnCMBlockBufferGetDataPointer(bb, 0, NULL, &avccTotal, &avccPtr);
+    if (rc != 0 || !avccPtr || avccTotal == 0) return;
+
+    NSMutableData *annexB = AVCCtoAnnexB((const uint8_t *)avccPtr, avccTotal);
+    if (verboseLogging_ && (vtFrameNo_ % 30 == 0)) {
+        NSLog(@"[Veency-VT] frame=%lld %@ %lu→%lu bytes",
+              (long long)vtFrameNo_, isKeyframe ? @"[KEY]" : @"     ",
+              (unsigned long)avccTotal, (unsigned long)annexB.length);
+    }
+
+    @synchronized (condition_) {
+        SendH264NALUToClients((const uint8_t *)annexB.bytes, annexB.length,
+                              isKeyframe, (int)destwidth_, (int)destheight_);
+    }
+}
+
+static void EncodeFrameViaVT(void *iosurface, int width, int height) {
+    if (!vtSession_ || !fnCVPixelBufferCreateWithIOSurface || !fnVTCompressionSessionEncodeFrame) return;
+
+    CVPixelBufferRef pb = NULL;
+    OSStatus rc = fnCVPixelBufferCreateWithIOSurface(NULL, iosurface, NULL, &pb);
+    if (rc != 0 || !pb) {
+        if (verboseLogging_) NSLog(@"[Veency-VT] CVPixelBufferCreateWithIOSurface rc=%d", (int)rc);
+        return;
+    }
+
+    CMTimeVL pts = {vtFrameNo_, maxFPS_, 1, 0};
+    CMTimeVL dur = {1, maxFPS_, 1, 0};
+    rc = fnVTCompressionSessionEncodeFrame(vtSession_, pb, pts, dur, NULL, NULL, NULL);
+    if (rc != 0 && verboseLogging_) NSLog(@"[Veency-VT] EncodeFrame rc=%d", (int)rc);
+    vtFrameNo_++;
+    CFRelease(pb);
+}
+
 static bool updatingScreen=false;
 static void OnLayer(IOMobileFramebufferRef fb, CoreSurfaceBufferRef layer) {
+    // 当 CARenderServer 主动 pull 模式启用时,Hook 路径必须让出来,否则双路冲突
+    if (carsRunning_) return;
+
     int doUpdates=1;
     if (_unlikely(width_ == 0 || height_ == 0)) {
         CGSize size;
@@ -944,7 +1499,7 @@ static void OnLayer(IOMobileFramebufferRef fb, CoreSurfaceBufferRef layer) {
             if (accelerator_ != NULL) {
 //                CoreSurfaceAcceleratorTransferSurface(accelerator_, layer, buffer_, options_);
 
-                if(!skipBlack_ && !divideScreenBy_) {
+                if(!skipBlack_ && divideScreenBy_ == 1) {
                     screen_->frameBuffer=(char *)bufferData_;
                     CoreSurfaceAcceleratorTransferSurface(accelerator_, layer, buffer_, options_);
                 } else {
@@ -954,7 +1509,8 @@ static void OnLayer(IOMobileFramebufferRef fb, CoreSurfaceBufferRef layer) {
                     CoreSurfaceAcceleratorTransferSurface(accelerator_, layer, buffer_, options2_);
 
                     if(skipBlack_) {
-                        usleep(skipBlack_);
+                        // TransferSurface 已同步等待 GPU,无需 usleep;若特定应用花屏可恢复 usleep(skipBlack_)
+                        CoreSurfaceBufferFlushProcessorCaches(buffer_);
                         ok=isBottomScreenBlack(bufferData_)?0:1;
                     }
                     if(ok) {
@@ -1007,8 +1563,17 @@ static void OnLayer(IOMobileFramebufferRef fb, CoreSurfaceBufferRef layer) {
 //    memcpy(mainFrameBuffer_,x,(4*640*200));
             }
         }
-        if(doUpdates)
-            rfbMarkRectAsModified(screen_, 0, 0, destwidth_, destheight_);
+        // H.264 路径:用硬件编码器编 buffer_(GPU 转换后的线性 BGRA),旁路 libvncserver 编码
+        if (h264Enabled_ && vtSession_ != NULL && buffer_ != NULL && doUpdates) {
+            EncodeFrameViaVT(buffer_, (int)destwidth_, (int)destheight_);
+        } else if(doUpdates) {
+            const uint32_t *fb = (const uint32_t *)screen_->frameBuffer;
+            uint64_t sig = QuickFrameSignature(fb, destwidth_, destheight_);
+            if (sig != lastFrameSig_) {
+                lastFrameSig_ = sig;
+                MarkDirtyTiles(fb, destwidth_, destheight_);
+            }
+        }
     }
 }
 
@@ -1070,8 +1635,71 @@ static void dlset(Type_ &function, const char *name) {
     function = reinterpret_cast<Type_>(dlsym(RTLD_DEFAULT, name));
 }
 
+// ============== 阶段 1:VT/CARenderServer/IOSurface API 探针 ==============
+// 目的:在 backboardd 与 SpringBoard 进程内 dlsym 检测 iOS 6.1.3 私下里的硬件视频 API,
+// 输出到 syslog,确认设备能走方案 B(VT 硬件 H.264)。失败时回 fallback。
+static void VeencyProbeAPIs() {
+    static const char *symbols[] = {
+        "VTCompressionSessionCreate",
+        "VTCompressionSessionEncodeFrame",
+        "VTCompressionSessionSetProperty",
+        "VTCompressionSessionCompleteFrames",
+        "VTCompressionSessionInvalidate",
+        "VTCompressionSessionGetPixelBufferPool",
+        "VTPixelTransferSessionCreate",
+        "VTPixelTransferSessionTransferImage",
+        "VTDecompressionSessionCreate",
+        "CARenderServerRenderDisplay",
+        "CARenderServerGetFrameCounter",
+        "IOMobileFramebufferGetMainDisplay",
+        "IOMobileFramebufferGetLayerDefaultSurface",
+        "IOSurfaceCreate",
+        "IOSurfaceLock",
+        "IOSurfaceUnlock",
+        "IOSurfaceGetBaseAddress",
+        "IOSurfaceAcceleratorCreate",
+        "IOSurfaceAcceleratorTransferSurface",
+        "IOSurfaceAcceleratorTransferSurfaceWithSwap",
+        "CVPixelBufferCreateWithIOSurface",
+        "CMBlockBufferGetDataPointer",
+        "CMSampleBufferGetDataBuffer",
+        "CMSampleBufferGetFormatDescription",
+        "CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
+        NULL
+    };
+    int found = 0, total = 0;
+    for (int i = 0; symbols[i]; i++) {
+        void *p = dlsym(RTLD_DEFAULT, symbols[i]);
+        NSLog(@"[Veency-Probe] %-55s %s", symbols[i], p ? "FOUND" : "MISSING");
+        if (p) found++;
+        total++;
+    }
+    NSLog(@"[Veency-Probe] === %d/%d symbols available on this device ===", found, total);
+}
+
 MSInitialize {
     NSAutoreleasePool *pool([[NSAutoreleasePool alloc] init]);
+
+    VeencyProbeAPIs();
+
+    // 解析 CARenderServer / IOSurface 函数指针(iOS 6 SPI)
+    fnCARenderServerRenderDisplay = (CARenderServerRenderDisplay_t)dlsym(RTLD_DEFAULT, "CARenderServerRenderDisplay");
+    fnIOSurfaceCreate = (IOSurfaceCreate_t)dlsym(RTLD_DEFAULT, "IOSurfaceCreate");
+    fnIOSurfaceLock = (IOSurfaceLock_t)dlsym(RTLD_DEFAULT, "IOSurfaceLock");
+    fnIOSurfaceUnlock = (IOSurfaceUnlock_t)dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
+    fnIOSurfaceGetBaseAddress = (IOSurfaceGetBaseAddress_t)dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+
+    // 解析 VT/CM/CV SPI(iOS 6 私下里就有)
+    fnVTCompressionSessionCreate = (VTCompressionSessionCreate_t)dlsym(RTLD_DEFAULT, "VTCompressionSessionCreate");
+    fnVTCompressionSessionEncodeFrame = (VTCompressionSessionEncodeFrame_t)dlsym(RTLD_DEFAULT, "VTCompressionSessionEncodeFrame");
+    fnVTCompressionSessionSetProperty = (VTCompressionSessionSetProperty_t)dlsym(RTLD_DEFAULT, "VTCompressionSessionSetProperty");
+    fnVTCompressionSessionInvalidate = (VTCompressionSessionInvalidate_t)dlsym(RTLD_DEFAULT, "VTCompressionSessionInvalidate");
+    fnCMSampleBufferGetDataBuffer = (CMSampleBufferGetDataBuffer_t)dlsym(RTLD_DEFAULT, "CMSampleBufferGetDataBuffer");
+    fnCMSampleBufferGetFormatDescription = (CMSampleBufferGetFormatDescription_t)dlsym(RTLD_DEFAULT, "CMSampleBufferGetFormatDescription");
+    fnCMSampleBufferGetSampleAttachmentsArray = (CMSampleBufferGetSampleAttachmentsArray_t)dlsym(RTLD_DEFAULT, "CMSampleBufferGetSampleAttachmentsArray");
+    fnCMBlockBufferGetDataPointer = (CMBlockBufferGetDataPointer_t)dlsym(RTLD_DEFAULT, "CMBlockBufferGetDataPointer");
+    fnCMFormatDescriptionGetExtension = (CMFormatDescriptionGetExtension_t)dlsym(RTLD_DEFAULT, "CMFormatDescriptionGetExtension");
+    fnCVPixelBufferCreateWithIOSurface = (CVPixelBufferCreateWithIOSurface_t)dlsym(RTLD_DEFAULT, "CVPixelBufferCreateWithIOSurface");
 
     MSHookSymbol(GSTakePurpleSystemEventPort, "_GSGetPurpleSystemEventPort");
     if (GSTakePurpleSystemEventPort == NULL) {
@@ -1114,12 +1742,12 @@ MSInitialize {
 
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        NULL, &VNCNotifyEnabled, CFSTR("com.saurik.Veency-Enabled"), NULL, 0
+        NULL, &VNCNotifyEnabled, CFSTR("com.saurik.Veency-Enabled"), NULL, (CFNotificationSuspensionBehavior)0
     );
 
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(),
-        NULL, &VNCNotifySettings, CFSTR("com.saurik.Veency-Settings"), NULL, 0
+        NULL, &VNCNotifySettings, CFSTR("com.saurik.Veency-Settings"), NULL, (CFNotificationSuspensionBehavior)0
     );
 
     condition_ = [[NSCondition alloc] init];

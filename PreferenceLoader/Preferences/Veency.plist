@@ -4,138 +4,228 @@
 <dict>
     <key>entry</key>
     <dict>
-	<key>cell</key>
-	<string>PSLinkCell</string>
-	<key>icon</key>
-	<string>VeencyIcon.png</string>
-	<key>label</key>
-	<string>Veency</string>
+        <key>cell</key><string>PSLinkCell</string>
+        <key>icon</key><string>VeencyIcon.png</string>
+        <key>label</key><string>Veency</string>
     </dict>
 
     <key>items</key>
     <array>
-	<dict>
-	    <key>cell</key>
-	    <string>PSGroupCell</string>
-	    <key>footerText</key>
-	    <string>Skipping black screens will enable better updates for camera, opengles, etc. apps.</string>
-	</dict>
 
+        <!-- ============ 基础 ============ -->
         <dict>
-	    <key>cell</key>
-	    <string>PSSwitchCell</string>
-	    <key>default</key>
-	    <true/>
-            <key>defaults</key>
-            <string>com.saurik.Veency</string>
-            <key>key</key>
-            <string>Enabled</string>
-            <key>label</key>
-            <string>Enabled</string>
-            <key>PostNotification</key>
-            <string>com.saurik.Veency-Enabled</string>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>基础</string>
         </dict>
 
         <dict>
-	    <key>cell</key>
-	    <string>PSSwitchCell</string>
-	    <key>default</key>
-	    <true/>
-            <key>defaults</key>
-            <string>com.saurik.Veency</string>
-            <key>key</key>
-            <string>ShowCursor</string>
-            <key>label</key>
-            <string>Show Cursor</string>
-            <key>PostNotification</key>
-            <string>com.saurik.Veency-Settings</string>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>Enabled</string>
+            <key>label</key><string>启用 Veency 服务</string>
+            <key>default</key><true/>
+            <key>PostNotification</key><string>com.saurik.Veency-Enabled</string>
         </dict>
 
         <dict>
-            <key>cell</key>
-	    <string>PSEditTextCell</string>
-	    <key>isNumeric</key>
-	    <true />
-            <key>default</key>
-            <integer>8000</integer>
-            <key>defaults</key>
-            <string>com.saurik.Veency</string>
-            <key>key</key>
-            <string>SkipBlack</string>
-            <key>label</key>
-            <string>Skip black screen delay</string>
-            <key>PostNotification</key>
-            <string>com.saurik.Veency-Settings</string>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>ShowCursor</string>
+            <key>label</key><string>显示鼠标光标</string>
+            <key>default</key><true/>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
         </dict>
 
-
-	<dict>
-	    <key>cell</key>
-	    <string>PSGroupCell</string>
-            <key>footerText</key>
-	    <string>Leaving the password blank will prompt you to accept each incoming connection and the connection will be view only.</string>
-	</dict>
+        <!-- ============ 安全 ============ -->
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>安全</string>
+            <key>footerText</key><string>密码留空时,每次有连接进入都会提示你确认接受。</string>
+        </dict>
 
         <dict>
-            <key>cell</key>
-            <string>PSSecureEditTextCell</string>
-            <key>defaults</key>
-            <string>com.saurik.Veency</string>
-            <key>key</key>
-            <string>Password</string>
-            <key>label</key>
-            <string>Password</string>
-            <key>PostNotification</key>
-            <string>com.saurik.Veency-Settings</string>
+            <key>cell</key><string>PSSecureEditTextCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>Password</string>
+            <key>label</key><string>VNC 密码</string>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
         </dict>
 
-	<dict>
-	    <key>cell</key>
-	    <string>PSGroupCell</string>
-	    <key>isStaticText</key>
-            <true/>
-            <key>requiredCapabilities</key>
-            <array><dict>
-                <key>wildcat</key><false/>
-                <key>voip</key><false/>
-            </dict></array>
-	</dict>
+        <!-- ============ 性能 - 通用 ============ -->
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>性能 — 通用</string>
+            <key>footerText</key><string>每秒最大帧数 (5-60,默认 30)。屏幕缩小倍数:1=原始,3=1/9 像素量。</string>
+        </dict>
 
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>MaxFPS</string>
+            <key>label</key><string>每秒最大帧数</string>
+            <key>isNumeric</key><true/>
+            <key>default</key><integer>30</integer>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
 
-	<dict>
-	    <key>cell</key>
-	    <string>PSTitleValueCell</string>
-	    <key>label</key>
-	    <string>Leaving the password blank will prompt you to accept each incoming connection and the connection will be view only.</string>
-            <key>requiredCapabilities</key>
-            <array><dict>
-                <key>wildcat</key><false/>
-                <key>voip</key><false/>
-            </dict></array>
-	</dict>
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>DivideScreenBy</string>
+            <key>label</key><string>屏幕尺寸缩小倍数</string>
+            <key>isNumeric</key><true/>
+            <key>default</key><integer>1</integer>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
 
-	<dict>
-	    <key>cell</key>
-	    <string>PSGroupCell</string>
-            <key>footerText</key>
-            <string>To get a smaller screen for faster updates.</string>
-	</dict>
-	<dict>
-	    <key>cell</key>
-	    <string>PSEditTextCell</string>
-            <key>defaults</key>
-            <string>com.saurik.Veency</string>
-	    <key>label</key>
-	    <string>Divide screen size by</string>
-	    <key>isNumeric</key>
-	    <true />
-            <key>default</key>
-            <integer>1</integer>
-            <key>key</key>
-            <string>DivideScreenBy</string>
-            <key>PostNotification</key>
-            <string>com.saurik.Veency-Settings</string>
-	</dict>
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>footerText</key><string>跳过黑屏功能可改善相机、OpenGL ES 等应用的画面刷新。设为 0 关闭(推荐默认)。值为微秒。</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>SkipBlack</string>
+            <key>label</key><string>跳过黑屏延时(微秒)</string>
+            <key>isNumeric</key><true/>
+            <key>default</key><integer>0</integer>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <!-- ============ 性能 - H.264 硬件编码 ============ -->
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>性能 — H.264 硬件编码(实验)</string>
+            <key>footerText</key><string>使用 iPod GPU 硬件 H.264 编码器。带宽 5-15 KB/帧,iPod CPU 几乎为零。需要支持 H.264 的客户端(自带 Mac 客户端 / TigerVNC viewer / 自写)。关闭则走 libvncserver 标准编码(Raw/ZRLE/Hextile)。</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>H264Enabled</string>
+            <key>label</key><string>启用硬件 H.264 编码</string>
+            <key>default</key><false/>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>H264Bitrate</string>
+            <key>label</key><string>比特率(kbps)</string>
+            <key>isNumeric</key><true/>
+            <key>default</key><integer>4000</integer>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSEditTextCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>H264KeyframeInterval</string>
+            <key>label</key><string>关键帧间隔(帧数)</string>
+            <key>isNumeric</key><true/>
+            <key>default</key><integer>60</integer>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSListItemsCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>H264Profile</string>
+            <key>label</key><string>编码 Profile</string>
+            <key>default</key><string>main</string>
+            <key>validValues</key>
+            <array>
+                <string>baseline</string>
+                <string>main</string>
+                <string>high</string>
+            </array>
+            <key>validTitles</key>
+            <array>
+                <string>Baseline(兼容性最好)</string>
+                <string>Main(默认,平衡)</string>
+                <string>High(画质最好)</string>
+            </array>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <!-- ============ 捕获方式(高级) ============ -->
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>捕获方式(高级)</string>
+            <key>footerText</key><string>Hook = IOMobileFramebuffer 钩注(原始 Veency 路径,被动接收每帧)。CARenderServer = 主动 pull(iOS 6 时代 Apple 录屏标准方法,不阻塞 SpringBoard)。VT 编码下推荐用 CARenderServer。</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSListItemsCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>CaptureMethod</string>
+            <key>label</key><string>捕获方法</string>
+            <key>default</key><string>hook</string>
+            <key>validValues</key>
+            <array>
+                <string>hook</string>
+                <string>carenderserver</string>
+            </array>
+            <key>validTitles</key>
+            <array>
+                <string>IOMobileFramebuffer Hook(默认)</string>
+                <string>CARenderServer 主动 pull</string>
+            </array>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <!-- ============ 调试 ============ -->
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>调试</string>
+            <key>footerText</key><string>开启后会在 syslog 输出每帧的捕获/编码/发送耗时与字节数。仅排错时打开,平时关闭以减少 CPU 占用。</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSSwitchCell</string>
+            <key>defaults</key><string>com.saurik.Veency</string>
+            <key>key</key><string>VerboseLogging</string>
+            <key>label</key><string>详细日志</string>
+            <key>default</key><false/>
+            <key>PostNotification</key><string>com.saurik.Veency-Settings</string>
+        </dict>
+
+        <!-- ============ 关于 / 版权 ============ -->
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>label</key><string>关于</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>版本</string>
+            <key>default</key><string>0.9.5000~h264</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>原作者</string>
+            <key>default</key><string>Jay Freeman (saurik)</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>本分支与中文化</string>
+            <key>default</key><string>小丑猫 © 2026</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSTitleValueCell</string>
+            <key>label</key><string>许可</string>
+            <key>default</key><string>GNU AGPL v3</string>
+        </dict>
+
+        <dict>
+            <key>cell</key><string>PSGroupCell</string>
+            <key>footerText</key><string>Veency 中文增强版 — M1+M2 已加速 + iOS 6 私有 VT 硬件 H.264 编码实验。原作 © Jay Freeman (saurik)。本分支增强、性能优化、中文化与 Mac 客户端:小丑猫 © 2026。</string>
+        </dict>
 
     </array>
 
