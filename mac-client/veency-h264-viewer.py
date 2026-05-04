@@ -73,12 +73,26 @@ def main():
     name = recv_n(s, nl).decode('utf-8', errors='replace')
     print(f"[veency] 已连 {w}×{h} ({name})")
 
-    # 发 home (button 0x04) 按下 + 抬起,唤醒 iPod 屏幕,触发 OnLayer 进而触发 VT 编码
+    # 发 home (button 0x04) 按下 + 抬起,唤醒 iPod 屏幕
     import time
-    s.send(struct.pack('>BBHH', 5, 0x04, w//2, h//2))   # PointerEvent: home
+    s.send(struct.pack('>BBHH', 5, 0x04, w//2, h//2))
     time.sleep(0.05)
-    s.send(struct.pack('>BBHH', 5, 0x00, w//2, h//2))   # release
+    s.send(struct.pack('>BBHH', 5, 0x00, w//2, h//2))
     print(f"[veency] 已发 home 唤醒事件")
+
+    # 持续做微小光标移动,保持 SpringBoard 重绘 → OnLayer 持续触发编码
+    def keep_alive_thread():
+        x_pos = w // 2
+        y_pos = h // 2
+        toggle = 0
+        while True:
+            try:
+                s.send(struct.pack('>BBHH', 5, 0x00, x_pos + toggle, y_pos))
+                toggle = (toggle + 1) % 3
+            except Exception:
+                return
+            time.sleep(0.5)
+    threading.Thread(target=keep_alive_thread, daemon=True).start()
 
     # 启动 ffplay 用 VideoToolbox 硬解 H.264 Annex B 流
     ffplay = subprocess.Popen([
